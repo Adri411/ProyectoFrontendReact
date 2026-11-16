@@ -1,38 +1,50 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import "./App.css";
 
-const API = import.meta.env.VITE_API_URL;
+const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const JUGADORES_POR_PAGINA = 25;
 
 interface Jugador {
   _id: string;
   name: string;
-  foto: string;
+  foto?: string;
   dorsal: number;
-  nacimiento: string;
-  nacionalidad: string;
+  nacimiento?: string;
+  nacionalidad?: string;
   posicion: string;
-  retirado: boolean;
-  carrera: { equipo: string; anio: number }[];
+  retirado?: boolean;
+  carrera?: { equipo: string; anio: number }[];
+}
+
+interface RespuestaJugadores {
+  count: number;
+  results: Jugador[];
+  error?: string;
 }
 
 interface Usuario {
-  id: string;
   nombre: string;
-  email: string;
   rol: string;
+}
+
+function normalizar(texto: string) {
+  return texto
+    .toLocaleLowerCase("es")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [usuario, setUsuario] = useState<Usuario | null>(null);
-  const [token, setToken] = useState("");
   const [jugadores, setJugadores] = useState<Jugador[]>([]);
-  const [jugadorSeleccionado, setJugadorSeleccionado] =
-    useState<Jugador | null>(null);
   const [busqueda, setBusqueda] = useState("");
-  const [error, setError] = useState("");
+  const [pagina, setPagina] = useState(1);
+  const [seleccionado, setSeleccionado] = useState<Jugador | null>(null);
   const [cargando, setCargando] = useState(false);
+  const [error, setError] = useState("");
 
   async function iniciarSesion(evento: FormEvent<HTMLFormElement>) {
     evento.preventDefault();
@@ -45,134 +57,105 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-
       const datos = await respuesta.json();
 
       if (!respuesta.ok) {
         throw new Error(datos.error || "No se pudo iniciar sesión.");
       }
 
-      setToken(datos.token);
-      setUsuario(datos.usuario);
+      setUsuario({
+        nombre: datos.usuario?.nombre || email,
+        rol: datos.usuario?.rol || datos.usuario?.role || "Usuario",
+      });
       setPassword("");
     } catch (fallo) {
-      setError(
-        fallo instanceof Error ? fallo.message : "Ha ocurrido un error.",
-      );
+      setError(fallo instanceof Error ? fallo.message : "Ha ocurrido un error.");
     } finally {
       setCargando(false);
     }
   }
 
   useEffect(() => {
-    if (!token) return;
+    if (!usuario) return;
 
     const controlador = new AbortController();
+    const signal = controlador.signal;
 
-    const temporizador = window.setTimeout(async () => {
+    async function cargarJugadores() {
       setCargando(true);
       setError("");
 
       try {
-        const parametros = new URLSearchParams({
-          limit: "25",
-          offset: "0",
-        });
+        const lista: Jugador[] = [];
+        let total: number;
 
-        if (busqueda.trim()) {
-          parametros.set("name", busqueda.trim());
-        }
-
-        const respuesta = await fetch(
-          `${API}/jugadores?${parametros.toString()}`,
-          {
-            headers: { Authorization: `Bearer ${token}` },
-            signal: controlador.signal,
-          },
-        );
-
-        const pagina = await respuesta.json();
-
-        if (!respuesta.ok) {
-          throw new Error(
-            pagina.error || "No se pudieron cargar los jugadores.",
+        do {
+          const respuesta = await fetch(
+            `${API}/jugadores?limit=100&offset=${lista.length}`,
+            { signal },
           );
-        }
+          const datos: RespuestaJugadores = await respuesta.json();
 
-        setJugadores(pagina.results);
+          if (!respuesta.ok) {
+            throw new Error(datos.error || "No se pudieron cargar los jugadores.");
+          }
+
+          total = datos.count;
+          if (datos.results.length === 0) break;
+
+          lista.push(...datos.results);
+        } while (lista.length < total);
+
+        if (!signal.aborted) setJugadores(lista);
       } catch (fallo) {
-        if (fallo instanceof Error && fallo.name !== "AbortError") {
-          setError(fallo.message);
+        if (!signal.aborted) {
+          const mensaje =
+            fallo instanceof Error
+              ? fallo.message
+              : "No se pudieron cargar los jugadores.";
+          setError(mensaje);
         }
       } finally {
-        if (!controlador.signal.aborted) {
-          setCargando(false);
-        }
+        if (!signal.aborted) setCargando(false);
       }
-    }, 400);
+    }
 
-    return () => {
-      window.clearTimeout(temporizador);
-      controlador.abort();
-    };
-  }, [token, busqueda]);
+    void cargarJugadores();
+    return () => controlador.abort();
+  }, [usuario]);
 
-  async function abrirFicha(id: string) {
+  const textoBuscado = normalizar(busqueda.trim());
+  const filtrados = jugadores.filter((jugador) =>
+    normalizar(jugador.name).includes(textoBuscado),
+  );
+  const inicio = (pagina - 1) * JUGADORES_POR_PAGINA;
+  const jugadoresPagina = filtrados.slice(inicio, inicio + JUGADORES_POR_PAGINA);
+  const totalPaginas = Math.ceil(filtrados.length / JUGADORES_POR_PAGINA);
+
+  function cerrarSesion() {
+    setUsuario(null);
+    setEmail("");
+    setPassword("");
+    setJugadores([]);
+    setBusqueda("");
+    setPagina(1);
+    setSeleccionado(null);
+    setCargando(false);
     setError("");
-    setCargando(true);
-
-    try {
-      const respuesta = await fetch(
-        `${API}/jugadores/${encodeURIComponent(id)}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
-
-      const jugador = await respuesta.json();
-
-      if (!respuesta.ok) {
-        throw new Error(jugador.error || "No se pudo cargar la ficha.");
-      }
-
-      setJugadorSeleccionado(jugador);
-    } catch (fallo) {
-      setError(
-        fallo instanceof Error ? fallo.message : "Ha ocurrido un error.",
-      );
-    } finally {
-      setCargando(false);
-    }
-  }
-
-  async function cerrarSesion() {
-    try {
-      await fetch(`${API}/api/auth/logout`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-    } finally {
-      setToken("");
-      setUsuario(null);
-      setJugadores([]);
-      setJugadorSeleccionado(null);
-      setBusqueda("");
-      setError("");
-    }
   }
 
   if (!usuario) {
     return (
-      <main>
+      <main className="login">
         <h1>Proyecto React</h1>
+        <p>Inicia sesión para ver el catálogo de jugadores.</p>
 
         <form onSubmit={iniciarSesion}>
-          <h2>Iniciar sesión</h2>
-
           <p>
             <label>
-              Correo electrónico{" "}
+              Correo electrónico
               <input
+                className="entrada"
                 type="email"
                 value={email}
                 onChange={(evento) => setEmail(evento.target.value)}
@@ -180,11 +163,11 @@ export default function App() {
               />
             </label>
           </p>
-
           <p>
             <label>
-              Contraseña{" "}
+              Contraseña
               <input
+                className="entrada"
                 type="password"
                 value={password}
                 onChange={(evento) => setPassword(evento.target.value)}
@@ -193,109 +176,151 @@ export default function App() {
             </label>
           </p>
 
-          <button disabled={cargando}>
-            {cargando ? "Entrando…" : "Iniciar sesión"}
+          <button className="boton" type="submit" disabled={cargando}>
+            {cargando ? "Entrando..." : "Iniciar sesión"}
           </button>
         </form>
 
-        {error && <p role="alert">{error}</p>}
+        {error && <p className="mensaje-error" role="alert">{error}</p>}
       </main>
     );
   }
 
   return (
-    <main>
-      <header>
-        <h1>Proyecto React</h1>
-        <p>
-          Sesión de {usuario.nombre} · Rol: {usuario.rol}
-        </p>
-        <button type="button" onClick={() => void cerrarSesion()}>
-          Cerrar sesión
-        </button>
-      </header>
+    <div className="aplicacion">
+      <aside className="barra-lateral">
+        <h2>Proyecto React</h2>
+        <div className="menu">♟　Jugadores</div>
+      </aside>
 
-      {jugadorSeleccionado ? (
-        <section>
-          <button
-            type="button"
-            onClick={() => setJugadorSeleccionado(null)}
-          >
-            Volver a jugadores
-          </button>
+      <div className="zona-principal">
+        <header className="barra-superior">
+          <span>TEMPORADA 26/27</span>
+          <span>
+            Sesión de {usuario.nombre} · Rol: {usuario.rol}　
+            <button className="boton boton-claro" onClick={cerrarSesion}>
+              Cerrar sesión
+            </button>
+          </span>
+        </header>
 
-          <h2>{jugadorSeleccionado.name}</h2>
-          {jugadorSeleccionado.foto && (
-            <img
-              src={jugadorSeleccionado.foto}
-              alt={`Foto de ${jugadorSeleccionado.name}`}
-              width="120"
-            />
-          )}
-          <p>Dorsal: {jugadorSeleccionado.dorsal}</p>
-          <p>Posición: {jugadorSeleccionado.posicion}</p>
-          <p>Nacionalidad: {jugadorSeleccionado.nacionalidad}</p>
-          <p>
-            Nacimiento:{" "}
-            {new Date(jugadorSeleccionado.nacimiento).toLocaleDateString(
-              "es-ES",
-            )}
-          </p>
-          <p>
-            Estado:{" "}
-            {jugadorSeleccionado.retirado ? "Retirado" : "En activo"}
-          </p>
+        <main className="contenido">
+          <section className="panel">
+            <small>CATÁLOGO</small>
+            <h1>Jugadores</h1>
 
-          <h3>Trayectoria</h3>
-          {jugadorSeleccionado.carrera.length ? (
-            <ul>
-              {jugadorSeleccionado.carrera.map((equipo, indice) => (
-                <li key={`${equipo.equipo}-${equipo.anio}-${indice}`}>
-                  {equipo.equipo} · {equipo.anio}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>No hay trayectoria registrada.</p>
-          )}
-        </section>
-      ) : (
-        <section>
-          <h2>Jugadores</h2>
-
-          <label>
-            Buscar por nombre{" "}
             <input
+              className="entrada"
               type="search"
+              placeholder="Buscar jugadores..."
               value={busqueda}
-              onChange={(evento) => setBusqueda(evento.target.value)}
-              placeholder="Ejemplo: Pedri"
+              onChange={(evento) => {
+                setBusqueda(evento.target.value);
+                setPagina(1);
+              }}
             />
-          </label>
 
-          {cargando && <p>Cargando…</p>}
+            <p>
+              Mostrando {jugadoresPagina.length} de {filtrados.length} jugadores
+            </p>
 
-          <ul>
-            {jugadores.map((jugador) => (
-              <li key={jugador._id}>
-                <button
-                  type="button"
-                  onClick={() => void abrirFicha(jugador._id)}
-                >
-                  {jugador.name} · Dorsal {jugador.dorsal} ·{" "}
-                  {jugador.posicion}
-                </button>
-              </li>
-            ))}
-          </ul>
+            {error && <p className="mensaje-error" role="alert">{error}</p>}
+            {cargando && <p>Cargando jugadores...</p>}
 
-          {!cargando && jugadores.length === 0 && (
-            <p>No hay jugadores con ese nombre.</p>
-          )}
-        </section>
+            {!cargando && !error && filtrados.length === 0 && (
+              <p>
+                {jugadores.length > 0
+                  ? "No se encontraron jugadores con ese nombre."
+                  : "No hay jugadores registrados."}
+              </p>
+            )}
+
+            {!cargando && jugadoresPagina.length > 0 && (
+              <>
+                <div className="tabla-contenedor">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Jugador</th>
+                        <th>Dorsal</th>
+                        <th>Posición</th>
+                        <th>Ficha</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jugadoresPagina.map((jugador) => (
+                        <tr key={jugador._id}>
+                          <td>{jugador.name}</td>
+                          <td>{jugador.dorsal}</td>
+                          <td>{jugador.posicion}</td>
+                          <td>
+                            <button
+                              className="boton boton-claro"
+                              onClick={() => setSeleccionado(jugador)}
+                            >
+                              Ver ficha
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="paginacion">
+                  <span>Página {pagina} de {totalPaginas}</span>
+                  <span>
+                    <button
+                      className="boton boton-claro"
+                      disabled={pagina === 1}
+                      onClick={() => setPagina(pagina - 1)}
+                    >
+                      Anterior
+                    </button>{" "}
+                    <button
+                      className="boton boton-claro"
+                      disabled={pagina === totalPaginas}
+                      onClick={() => setPagina(pagina + 1)}
+                    >
+                      Siguiente
+                    </button>
+                  </span>
+                </div>
+              </>
+            )}
+          </section>
+        </main>
+      </div>
+
+      {seleccionado && (
+        <div className="fondo-ficha" onClick={() => setSeleccionado(null)}>
+          <section
+            className="ficha"
+            role="dialog"
+            aria-modal="true"
+            onClick={(evento) => evento.stopPropagation()}
+          >
+            <h2>Ficha de jugador</h2>
+
+            {seleccionado.foto && (
+              <img src={seleccionado.foto} alt={`Foto de ${seleccionado.name}`} />
+            )}
+
+            <h3>{seleccionado.name}</h3>
+            <p>Dorsal: {seleccionado.dorsal}</p>
+            <p>Posición: {seleccionado.posicion}</p>
+            <p>Nacionalidad: {seleccionado.nacionalidad || "No indicada"}</p>
+            <p>Estado: {seleccionado.retirado ? "Retirado" : "En activo"}</p>
+
+            <button
+              className="boton boton-claro"
+              onClick={() => setSeleccionado(null)}
+            >
+              Cerrar ficha
+            </button>
+          </section>
+        </div>
       )}
-
-      {error && <p role="alert">{error}</p>}
-    </main>
+    </div>
   );
 }
